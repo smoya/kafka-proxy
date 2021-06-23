@@ -18,7 +18,7 @@ func (handler *SaslAuthV0RequestHandler) handleRequest(dst DeadlineWriter, src D
 	if readErr, err = copySaslAuthRequest(dst, src, ctx.timeout, ctx.buf); err != nil {
 		return readErr, err
 	}
-	if err = ctx.putNextHandlers(defaultRequestHandler, defaultResponseHandler); err != nil {
+	if err = ctx.putNextHandlers(ActualDefaultRequestHandler, defaultResponseHandler); err != nil {
 		return false, err
 	}
 	return false, nil

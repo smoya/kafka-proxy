@@ -12,6 +12,15 @@ import (
 )
 
 type DefaultRequestHandler struct {
+	RequestKeyHandlers KeyHandlers
+}
+
+func NewDefaultRequestHandler(requestKeyHandlers KeyHandlers) *DefaultRequestHandler {
+	if len(requestKeyHandlers.Handlers) == 0 {
+		requestKeyHandlers.Set(apiKeyProduce, KeyHandlerFunc(DefaultProduceKeyHandlerFunc))
+	}
+
+	return &DefaultRequestHandler{RequestKeyHandlers: requestKeyHandlers}
 }
 
 type DefaultResponseHandler struct {
@@ -76,7 +85,7 @@ func (handler *DefaultRequestHandler) handleRequest(dst DeadlineWriter, src Dead
 					return false, err
 				}
 				// defaultRequestHandler was consumed but due to local handling enqueued defaultResponseHandler will not be.
-				return false, ctx.putNextRequestHandler(defaultRequestHandler)
+				return false, ctx.putNextRequestHandler(ActualDefaultRequestHandler)
 			case apiKeyApiApiVersions:
 				// continue processing
 			default:
@@ -85,7 +94,7 @@ func (handler *DefaultRequestHandler) handleRequest(dst DeadlineWriter, src Dead
 		}
 	}
 
-	mustReply, readBytes, err := handler.mustReply(requestKeyVersion, src, ctx)
+	mustReply, readBytes, err := handler.doHandle(requestKeyVersion, src, ctx)
 	if err != nil {
 		return true, err
 	}
@@ -127,54 +136,69 @@ func (handler *DefaultRequestHandler) handleRequest(dst DeadlineWriter, src Dead
 		}
 	}
 	if mustReply {
-		return false, ctx.putNextHandlers(defaultRequestHandler, defaultResponseHandler)
+		return false, ctx.putNextHandlers(ActualDefaultRequestHandler, defaultResponseHandler)
 	} else {
-		return false, ctx.putNextRequestHandler(defaultRequestHandler)
+		return false, ctx.putNextRequestHandler(ActualDefaultRequestHandler)
 	}
 }
 
-func (handler *DefaultRequestHandler) mustReply(requestKeyVersion *protocol.RequestKeyVersion, src io.Reader, ctx *RequestsLoopContext) (bool, []byte, error) {
-	if requestKeyVersion.ApiKey == apiKeyProduce {
-		if ctx.producerAcks0Disabled {
-			return true, nil, nil
-		}
-		// header version for produce [0..8] is 1 (request_api_key,request_api_version,correlation_id (INT32),client_id, NULLABLE_STRING )
-		acksReader := protocol.RequestAcksReader{}
+func (handler *DefaultRequestHandler) doHandle(requestKeyVersion *protocol.RequestKeyVersion, src io.Reader, ctx *RequestsLoopContext) (bool, []byte, error) {
+	shouldReply := true // Always reply by default
+	var err error
 
-		var (
-			acks int16
-			err  error
-		)
-		var bufferRead bytes.Buffer
-		reader := io.TeeReader(src, &bufferRead)
-		switch requestKeyVersion.ApiVersion {
-		case 0, 1, 2:
-			// CorrelationID + ClientID
-			if err = acksReader.ReadAndDiscardHeaderV1Part(reader); err != nil {
-				return false, nil, err
-			}
-			// acks (INT16)
-			acks, err = acksReader.ReadAndDiscardProduceAcks(reader)
-			if err != nil {
-				return false, nil, err
-			}
-
-		case 3, 4, 5, 6, 7, 8:
-			// CorrelationID + ClientID
-			if err = acksReader.ReadAndDiscardHeaderV1Part(reader); err != nil {
-				return false, nil, err
-			}
-			// transactional_id (NULLABLE_STRING),acks (INT16)
-			acks, err = acksReader.ReadAndDiscardProduceTxnAcks(reader)
-			if err != nil {
-				return false, nil, err
-			}
-		default:
-			return false, nil, fmt.Errorf("produce version %d is not supported", requestKeyVersion.ApiVersion)
+	bufferRead := bytes.NewBuffer(nil)
+	if h := handler.RequestKeyHandlers.Get(requestKeyVersion.ApiKey); h != nil {
+		shouldReply, err = h.Handle(requestKeyVersion, src, ctx, bufferRead)
+		if err != nil {
+			return shouldReply, bufferRead.Bytes(), err
 		}
-		return acks != 0, bufferRead.Bytes(), nil
 	}
-	return true, nil, nil
+
+	return shouldReply, bufferRead.Bytes(), err
+}
+
+func DefaultProduceKeyHandlerFunc(requestKeyVersion *protocol.RequestKeyVersion, src io.Reader, ctx *RequestsLoopContext, bufferRead *bytes.Buffer) (bool, error) {
+	if requestKeyVersion.ApiKey != apiKeyProduce {
+		return true, nil
+	}
+
+	if ctx.producerAcks0Disabled {
+		return true, nil
+	}
+	// header version for produce [0..8] is 1 (request_api_key,request_api_version,correlation_id (INT32),client_id, NULLABLE_STRING )
+	acksReader := protocol.RequestAcksReader{}
+
+	var (
+		acks int16
+		err  error
+	)
+	reader := io.TeeReader(src, bufferRead)
+	switch requestKeyVersion.ApiVersion {
+	case 0, 1, 2:
+		// CorrelationID + ClientID
+		if err = acksReader.ReadAndDiscardHeaderV1Part(reader); err != nil {
+			return false, err
+		}
+		// acks (INT16)
+		acks, err = acksReader.ReadAndDiscardProduceAcks(reader)
+		if err != nil {
+			return false, err
+		}
+
+	case 3, 4, 5, 6, 7, 8:
+		// CorrelationID + ClientID
+		if err = acksReader.ReadAndDiscardHeaderV1Part(reader); err != nil {
+			return false, err
+		}
+		// transactional_id (NULLABLE_STRING),acks (INT16)
+		acks, err = acksReader.ReadAndDiscardProduceTxnAcks(reader)
+		if err != nil {
+			return false, err
+		}
+	default:
+		return false, fmt.Errorf("produce version %d is not supported", requestKeyVersion.ApiVersion)
+	}
+	return acks != 0, nil
 }
 
 func (handler *DefaultResponseHandler) handleResponse(dst DeadlineWriter, src DeadlineReader, ctx *ResponsesLoopContext) (readErr bool, err error) {

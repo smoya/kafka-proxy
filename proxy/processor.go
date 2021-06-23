@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bytes"
 	"errors"
 	"github.com/grepplabs/kafka-proxy/config"
 	"github.com/grepplabs/kafka-proxy/proxy/protocol"
+	"io"
 	"time"
 )
 
@@ -25,10 +27,10 @@ const (
 )
 
 var (
-	defaultRequestHandler     = &DefaultRequestHandler{}
-	defaultResponseHandler    = &DefaultResponseHandler{}
-	saslAuthV0RequestHandler  = &SaslAuthV0RequestHandler{}
-	saslAuthV0ResponseHandler = &SaslAuthV0ResponseHandler{}
+	ActualDefaultRequestHandler = NewDefaultRequestHandler(KeyHandlers{})
+	defaultResponseHandler      = &DefaultResponseHandler{}
+	saslAuthV0RequestHandler    = &SaslAuthV0RequestHandler{}
+	saslAuthV0ResponseHandler   = &SaslAuthV0ResponseHandler{}
 )
 
 type ProcessorConfig struct {
@@ -90,7 +92,7 @@ func newProcessor(cfg ProcessorConfig, brokerAddress string) *processor {
 	nextResponseHandlerChannel := make(chan ResponseHandler, maxOpenRequests+1)
 
 	// initial handlers -> standard kafka message arrives always as first
-	nextRequestHandlerChannel <- defaultRequestHandler
+	nextRequestHandlerChannel <- ActualDefaultRequestHandler
 	nextResponseHandlerChannel <- defaultResponseHandler
 
 	return &processor{
@@ -196,6 +198,36 @@ func (r *RequestsLoopContext) getNextRequestHandler() (RequestHandler, error) {
 
 type RequestHandler interface {
 	handleRequest(dst DeadlineWriter, src DeadlineReaderWriter, ctx *RequestsLoopContext) (readErr bool, err error)
+}
+
+type KeyHandler interface {
+	Handle(requestKeyVersion *protocol.RequestKeyVersion, src io.Reader, ctx *RequestsLoopContext, bufferRead *bytes.Buffer) (shouldReply bool, err error)
+}
+
+type KeyHandlerFunc func(requestKeyVersion *protocol.RequestKeyVersion, src io.Reader, ctx *RequestsLoopContext, bufferRead *bytes.Buffer) (shouldReply bool, err error)
+
+func (h KeyHandlerFunc) Handle(requestKeyVersion *protocol.RequestKeyVersion, src io.Reader, ctx *RequestsLoopContext, bufferRead *bytes.Buffer) (shouldReply bool, err error) {
+	return h(requestKeyVersion, src, ctx, bufferRead)
+}
+
+type KeyHandlers struct {
+	Handlers map[int16]KeyHandler
+}
+
+func (k *KeyHandlers) Set(key int16, h KeyHandler) {
+	if k.Handlers == nil {
+		k.Handlers = make(map[int16]KeyHandler)
+	}
+
+	k.Handlers[key] = h
+}
+
+func (k *KeyHandlers) Get(key int16) KeyHandler {
+	if k.Handlers == nil {
+		return nil
+	}
+
+	return k.Handlers[key]
 }
 
 func (r *RequestsLoopContext) requestsLoop(dst DeadlineWriter, src DeadlineReaderWriter) (readErr bool, err error) {

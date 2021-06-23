@@ -96,7 +96,7 @@ func TestHandleRequest(t *testing.T) {
 		}
 
 		a := assert.New(t)
-		_, err = defaultRequestHandler.handleRequest(dst, src, ctx)
+		_, err = ActualDefaultRequestHandler.handleRequest(dst, src, ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +114,7 @@ func TestHandleRequest(t *testing.T) {
 
 		select {
 		case nextRequestHandler := <-nextRequestHandlerChannel:
-			a.Equal(defaultRequestHandler, nextRequestHandler)
+			a.Equal(ActualDefaultRequestHandler, nextRequestHandler)
 		default:
 			a.Fail("Next request was not received")
 		}
